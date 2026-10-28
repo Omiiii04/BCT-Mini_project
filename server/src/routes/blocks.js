@@ -53,87 +53,93 @@ router.get('/:index', (req, res) => {
 });
 
 /* POST /api/blocks/mine - mine a new block */
-router.post('/mine', (req, res) => {
-  const { difficulty: diffOverride, minerAddress } = req.body;
+router.post('/mine', async (req, res, next) => {
+  try {
+    const { difficulty: diffOverride, minerAddress } = req.body;
 
-  const lastBlock = getLastBlock();
-  const prevHash = lastBlock ? lastBlock.hash : ZERO_HASH;
-  const index = lastBlock ? lastBlock.index + 1 : 0;
-  const difficulty = diffOverride !== undefined ? parseInt(diffOverride, 10) : DEFAULT_DIFFICULTY;
+    const lastBlock = getLastBlock();
+    const prevHash = lastBlock ? lastBlock.hash : ZERO_HASH;
+    const index = lastBlock ? lastBlock.index + 1 : 0;
+    const difficulty = diffOverride !== undefined ? parseInt(diffOverride, 10) : DEFAULT_DIFFICULTY;
 
-  const pending = all('SELECT * FROM transactions WHERE confirmed = 0 ORDER BY timestamp ASC LIMIT ?', [MAX_TX_PER_BLOCK]);
+    const pending = all('SELECT * FROM transactions WHERE confirmed = 0 ORDER BY timestamp ASC LIMIT ?', [MAX_TX_PER_BLOCK]);
 
-  const blockTxs = [
-    {
-      id: 'cb_' + index,
-      kind: 'coinbase',
-      sender: null,
-      recipient: minerAddress || 'Miner',
-      amount: REWARD,
+    const resolvedMiner = minerAddress || (lastBlock ? lastBlock.miner : 'Miner');
+
+    const blockTxs = [
+      {
+        id: 'cb_' + index,
+        kind: 'coinbase',
+        sender: null,
+        recipient: resolvedMiner,
+        amount: REWARD,
+        timestamp: Date.now(),
+        signature: null,
+      },
+      ...pending.map((t) => ({
+        id: t.id,
+        kind: t.kind,
+        sender: t.sender,
+        recipient: t.recipient,
+        amount: t.amount,
+        timestamp: t.timestamp,
+        signature: t.signature,
+      })),
+    ];
+
+    const dataHash = dataHashOf(blockTxs);
+    const block = {
+      index,
       timestamp: Date.now(),
-      signature: null,
-    },
-    ...pending.map((t) => ({
-      id: t.id,
-      kind: t.kind,
-      sender: t.sender,
-      recipient: t.recipient,
-      amount: t.amount,
-      timestamp: t.timestamp,
-      signature: t.signature,
-    })),
-  ];
+      note: `Mined by ${resolvedMiner} · block reward ${REWARD} ${COIN}`,
+      nonce: 0,
+      difficulty,
+      prevHash,
+      hash: '',
+      dataHash,
+      txs: blockTxs,
+    };
 
-  const dataHash = dataHashOf(blockTxs);
-  const block = {
-    index,
-    timestamp: Date.now(),
-    note: `Mined by ${minerAddress || 'Miner'} · block reward ${REWARD} ${COIN}`,
-    nonce: 0,
-    difficulty,
-    prevHash,
-    hash: '',
-    dataHash,
-    txs: blockTxs,
-  };
+    const used = await mine(block, difficulty, () => {});
 
-  const used = mine(block, difficulty, () => {});
+    const blockRow = {
+      index: block.index,
+      timestamp: block.timestamp,
+      note: block.note,
+      nonce: block.nonce,
+      difficulty: block.difficulty,
+      prev_hash: block.prevHash,
+      hash: block.hash,
+      data_hash: block.dataHash,
+      miner: resolvedMiner,
+      reward: REWARD,
+    };
 
-  const blockRow = {
-    index: block.index,
-    timestamp: block.timestamp,
-    note: block.note,
-    nonce: block.nonce,
-    difficulty: block.difficulty,
-    prev_hash: block.prevHash,
-    hash: block.hash,
-    data_hash: block.dataHash,
-    miner: minerAddress || 'Miner',
-    reward: REWARD,
-  };
+    run(
+      'INSERT INTO blocks ([index], timestamp, note, nonce, difficulty, prev_hash, hash, data_hash, miner, reward) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      [blockRow.index, blockRow.timestamp, blockRow.note, blockRow.nonce, blockRow.difficulty, blockRow.prev_hash, blockRow.hash, blockRow.data_hash, blockRow.miner, blockRow.reward]
+    );
 
-  run(
-    'INSERT INTO blocks ([index], timestamp, note, nonce, difficulty, prev_hash, hash, data_hash, miner, reward) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-    [blockRow.index, blockRow.timestamp, blockRow.note, blockRow.nonce, blockRow.difficulty, blockRow.prev_hash, blockRow.hash, blockRow.data_hash, blockRow.miner, blockRow.reward]
-  );
+    // Mark the pending transactions as confirmed and link to this block
+    for (const t of pending) {
+      run('UPDATE transactions SET block_index = ?, confirmed = 1 WHERE id = ? AND confirmed = 0', [block.index, t.id]);
+    }
 
-  // Mark the pending transactions as confirmed and link to this block
-  for (const t of pending) {
-    run('UPDATE transactions SET block_index = ?, confirmed = 1 WHERE id = ? AND confirmed = 0', [block.index, t.id]);
+    // Persist the coinbase reward transaction
+    const cb = blockTxs[0];
+    run(
+      'INSERT INTO transactions (id, kind, sender, recipient, amount, timestamp, signature, block_index, confirmed) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)',
+      [cb.id, cb.kind, cb.sender, cb.recipient, cb.amount, cb.timestamp, cb.signature, block.index]
+    );
+
+    res.status(201).json({
+      ...blockRow,
+      txs: blockTxs,
+      hashes: used,
+    });
+  } catch (err) {
+    next(err);
   }
-
-  // Persist the coinbase reward transaction
-  const cb = blockTxs[0];
-  run(
-    'INSERT INTO transactions (id, kind, sender, recipient, amount, timestamp, signature, block_index, confirmed) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)',
-    [cb.id, cb.kind, cb.sender, cb.recipient, cb.amount, cb.timestamp, cb.signature, block.index]
-  );
-
-  res.status(201).json({
-    ...blockRow,
-    txs: blockTxs,
-    hashes: used,
-  });
 });
 
 export default router;

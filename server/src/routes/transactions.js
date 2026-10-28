@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { getDb, all, get, run } from '../db.js';
 import { sha256, mine, dataHashOf } from '../services/blockchain.js';
-import { signPayload, txPayload } from '../services/wallet.js';
+import { signPayload, verifySignature, txPayload } from '../services/wallet.js';
 
 const router = Router();
 const COIN = process.env.COIN || 'DMC';
@@ -41,57 +41,91 @@ router.get('/mempool', (_req, res) => {
 });
 
 /* POST /api/transactions - create and sign a transfer */
-router.post('/', (req, res) => {
-  const { senderAddress, recipientAddress, amount, privateKey, publicKey } = req.body;
+router.post('/', (req, res, next) => {
+  try {
+    const { senderAddress, recipientAddress, amount, privateKey, signature: providedSignature } = req.body;
 
-  if (!senderAddress || !recipientAddress || !amount) {
-    const err = new Error('senderAddress, recipientAddress and amount are required');
-    err.status = 400;
-    throw err;
+    if (!senderAddress || !recipientAddress || amount === undefined || amount === null) {
+      const err = new Error('senderAddress, recipientAddress and amount are required');
+      err.status = 400;
+      throw err;
+    }
+
+    if (senderAddress === recipientAddress) {
+      const err = new Error('Cannot send transaction to self');
+      err.status = 400;
+      throw err;
+    }
+
+    const amountNum = parseInt(amount, 10);
+    if (!Number.isInteger(amountNum) || amountNum < 1) {
+      const err = new Error('Amount must be a whole number >= 1');
+      err.status = 400;
+      throw err;
+    }
+
+    const sender = get('SELECT * FROM wallets WHERE address = ?', [senderAddress]);
+    if (!sender) {
+      const err = new Error('Sender wallet not found in local registry');
+      err.status = 404;
+      throw err;
+    }
+
+    const recipient = get('SELECT * FROM wallets WHERE address = ?', [recipientAddress]);
+
+    const bal = computeBalances();
+    const pendingOut = all("SELECT * FROM transactions WHERE confirmed = 0 AND sender = ?", [senderAddress])
+      .reduce((sum, t) => sum + t.amount, 0);
+    const spendable = (bal[senderAddress] || 0) - pendingOut;
+    if (amountNum > spendable) {
+      const err = new Error(`Insufficient spendable balance: ${sender.name || senderAddress} has ${spendable} ${COIN} spendable (${bal[senderAddress] || 0} balance, ${pendingOut} in mempool)`);
+      err.status = 400;
+      throw err;
+    }
+
+    const timestamp = Date.now();
+    const payload = txPayload({ sender: senderAddress, recipient: recipientAddress, amount: amountNum, timestamp });
+
+    let signature = providedSignature;
+    if (!signature) {
+      const privKey = privateKey || sender.private_key || sender.privateKey;
+      if (!privKey) {
+        const err = new Error('Private key unavailable to sign transaction');
+        err.status = 400;
+        throw err;
+      }
+      signature = signPayload(privKey, payload);
+    } else {
+      const pubKey = sender.public_key || sender.publicKey;
+      if (pubKey && !verifySignature(pubKey, payload, signature)) {
+        const err = new Error('Invalid digital signature for transaction payload');
+        err.status = 400;
+        throw err;
+      }
+    }
+
+    const id = 'tx_' + sha256(senderAddress + recipientAddress + amountNum + timestamp + Math.random()).slice(0, 16);
+
+    const tx = {
+      id, kind: 'transfer', sender: senderAddress, recipient: recipientAddress,
+      amount: amountNum, timestamp, signature, block_index: null, confirmed: 0,
+    };
+
+    run(
+      'INSERT INTO transactions (id, kind, sender, recipient, amount, timestamp, signature, block_index, confirmed) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      [tx.id, tx.kind, tx.sender, tx.recipient, tx.amount, tx.timestamp, tx.signature, tx.block_index, tx.confirmed]
+    );
+
+    res.status(201).json({
+      ...tx,
+      senderName: sender.name,
+      senderEmoji: sender.emoji,
+      recipientName: recipient ? recipient.name : null,
+      recipientEmoji: recipient ? recipient.emoji : null,
+    });
+  } catch (err) {
+    next(err);
   }
-
-  const amountNum = parseInt(amount, 10);
-  if (!Number.isInteger(amountNum) || amountNum < 1) {
-    const err = new Error('Amount must be a whole number >= 1');
-    err.status = 400;
-    throw err;
-  }
-
-  const sender = get('SELECT * FROM wallets WHERE address = ?', [senderAddress]);
-  if (!sender) {
-    const err = new Error('Sender wallet not found');
-    err.status = 404;
-    throw err;
-  }
-
-  const bal = computeBalances();
-  const pendingOut = all("SELECT * FROM transactions WHERE confirmed = 0 AND sender = ?", [senderAddress])
-    .reduce((sum, t) => sum + t.amount, 0);
-  const spendable = (bal[senderAddress] || 0) - pendingOut;
-  if (amountNum > spendable) {
-    const err = new Error(`Insufficient balance: ${senderAddress} has ${spendable} spendable ${COIN}`);
-    err.status = 400;
-    throw err;
-  }
-
-  const timestamp = Date.now();
-  const payload = txPayload({ sender: senderAddress, recipient: recipientAddress, amount: amountNum, timestamp });
-  const privKey = privateKey || sender.privateKey;
-  const signature = signPayload(privKey, payload);
-
-  const id = 'tx_' + sha256(senderAddress + recipientAddress + amountNum + timestamp + Math.random()).slice(0, 16);
-
-  const tx = {
-    id, kind: 'transfer', sender: senderAddress, recipient: recipientAddress,
-    amount: amountNum, timestamp, signature, block_index: null, confirmed: 0,
-  };
-
-  run(
-    'INSERT INTO transactions (id, kind, sender, recipient, amount, timestamp, signature, block_index, confirmed) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
-    [tx.id, tx.kind, tx.sender, tx.recipient, tx.amount, tx.timestamp, tx.signature, tx.block_index, tx.confirmed]
-  );
-
-  res.status(201).json({ ...tx, senderEmoji: sender.emoji });
 });
 
 /* DELETE /api/transactions/:id - remove from mempool */

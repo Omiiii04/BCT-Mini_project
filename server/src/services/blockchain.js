@@ -6,15 +6,15 @@ export function sha256(input) {
 }
 
 /* Serialize block header deterministically for hashing.
-   Ends with ","nonce":" so the miner/appender can inject the nonce value
+   Ends with ',"nonce":' so the miner/appender can inject the nonce value
    and closing brace: headerString(block) + nonce + "}". */
 export function headerString(block) {
   return JSON.stringify({
     index: block.index,
     timestamp: block.timestamp,
     note: block.note,
-    dataHash: block.dataHash,
-    prevHash: block.prevHash,
+    dataHash: block.dataHash !== undefined ? block.dataHash : block.data_hash,
+    prevHash: block.prevHash !== undefined ? block.prevHash : block.prev_hash,
   }) + ',"nonce":';
 }
 

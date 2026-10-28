@@ -31,6 +31,9 @@ router.get('/', (_req, res) => {
   const bal = computeBalances();
   const result = wallets.map((w) => ({
     ...w,
+    publicKey: w.public_key,
+    privateKey: w.private_key,
+    createdAt: w.created_at,
     balance: bal[w.address] || 0,
   }));
   res.json(result);
@@ -38,7 +41,7 @@ router.get('/', (_req, res) => {
 
 /* POST /api/wallets - create a new wallet */
 router.post('/', (req, res) => {
-  const { name } = req.body;
+  const { name, emoji } = req.body;
   if (!name) {
     const err = new Error('Wallet name is required');
     err.status = 400;
@@ -47,14 +50,21 @@ router.post('/', (req, res) => {
 
   const w = makeWallet(name);
   const now = Date.now();
+  const emojis = ['👤', '🦊', '⚡', '💎', '🚀', '🔮', '🛡️', '🦁', '🌟', '🍀'];
+  const assignedEmoji = emoji || emojis[Math.floor(Math.random() * emojis.length)];
+
   run(
     'INSERT INTO wallets (address, name, public_key, private_key, emoji, created_at) VALUES (?, ?, ?, ?, ?, ?)',
-    [w.address, name, w.publicKey, w.privateKey, w.emoji || '👤', now]
+    [w.address, name, w.publicKey, w.privateKey, assignedEmoji, now]
   );
 
   const bal = computeBalances();
   res.status(201).json({
     ...w,
+    emoji: assignedEmoji,
+    publicKey: w.publicKey,
+    privateKey: w.privateKey,
+    createdAt: now,
     balance: bal[w.address] || 0,
   });
 });
@@ -68,7 +78,13 @@ router.get('/:address', (req, res) => {
     throw err;
   }
   const bal = computeBalances();
-  res.json({ ...w, balance: bal[w.address] || 0 });
+  res.json({
+    ...w,
+    publicKey: w.public_key,
+    privateKey: w.private_key,
+    createdAt: w.created_at,
+    balance: bal[w.address] || 0,
+  });
 });
 
 export default router;
